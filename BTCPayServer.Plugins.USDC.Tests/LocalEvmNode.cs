@@ -141,12 +141,19 @@ internal sealed class LocalEvmNode : IAsyncDisposable
                 }
             case "eth_getLogs":
                 var filter = request["params"]![0]!;
-                var blockHash = filter["blockHash"]!.Value<string>()!;
-                var hashHeight = Convert.ToInt32(blockHash[^8..], 16) % 1000000;
+                var blockHash = filter["blockHash"]?.Value<string>();
                 // EIP-234: a node that does not have the block returns an error, never [].
-                if (hashHeight > FinalizedHeight || HashAt(hashHeight) != blockHash)
-                    throw new UnknownBlockException($"block not found: {blockHash}");
-                lock (_gate) return new JArray(_logs.Where(log => log["blockHash"]!.Value<string>() == blockHash &&
+                if (blockHash is not null)
+                {
+                    var hashHeight = Convert.ToInt32(blockHash[^8..], 16) % 1000000;
+                    if (hashHeight > FinalizedHeight || HashAt(hashHeight) != blockHash)
+                        throw new UnknownBlockException($"block not found: {blockHash}");
+                }
+                // The USDt plugin shares this node in co-install tests and filters by number.
+                lock (_gate) return new JArray(_logs.Where(log => (blockHash is not null
+                        ? log["blockHash"]!.Value<string>() == blockHash
+                        : log["blockNumber"]!.Value<string>() == filter["fromBlock"]!.Value<string>() &&
+                          log["blockHash"]!.Value<string>() == HashAt(Convert.ToInt32(log["blockNumber"]!.Value<string>()![2..],16))) &&
                     filter["address"]!.ToString().Contains(log["address"]!.Value<string>()!, StringComparison.OrdinalIgnoreCase) &&
                     filter["topics"]![2]!.ToString().Contains(log["topics"]![2]!.Value<string>()!, StringComparison.OrdinalIgnoreCase)).Select(log => log.DeepClone()));
             default: throw new InvalidOperationException($"Unexpected RPC: {request["method"]}");
