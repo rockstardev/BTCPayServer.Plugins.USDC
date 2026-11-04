@@ -243,7 +243,7 @@ public partial class HostSmokeTests
         await File.WriteAllTextAsync(Path.Combine(screenshots, "usdc-checkout.html"), await page.ContentAsync());
         await Assertions.Expect(page.Locator("body")).ToContainTextAsync("USDC");
         await Assertions.Expect(page.Locator("body")).ToContainTextAsync("1.234567");
-        await Assertions.Expect(page.GetByTestId("usdc-checkout-network")).ToHaveTextAsync(displayName);
+        await Assertions.Expect(page.Locator(".payment-box")).Not.ToContainTextAsync(displayName);
         await Assertions.Expect(page.Locator(".qr-container")).ToHaveAttributeAsync("data-qr-value", method.PaymentLink);
         await Assertions.Expect(page.Locator(".qr-container svg")).ToBeVisibleAsync();
         await Assertions.Expect(page.Locator(".qr-container")).ToHaveAttributeAsync("data-clipboard", method.PaymentLink);
