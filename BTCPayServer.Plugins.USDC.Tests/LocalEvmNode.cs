@@ -24,7 +24,7 @@ internal sealed class LocalEvmNode : IAsyncDisposable
     private readonly Dictionary<int, int> _forks = [];
     private string HashAt(int height) { lock (_gate) return Hash(height + (_forks.Where(f => height >= f.Key).OrderByDescending(f => f.Key).FirstOrDefault().Value * 1000000)); }
     public void ForkFrom(int height, int branch) { lock (_gate) _forks[height] = branch; }
-    public void Reinclude(int oldHeight, int newHeight, int indexOffset = 0)
+    public void Reinclude(int oldHeight, int newHeight, int indexOffset = 0, int? atomicAmount = null)
     {
         lock (_gate)
         foreach (var old in _logs.Where(l => l["blockNumber"]!.Value<string>() == "0x" + oldHeight.ToString("x")).ToArray())
@@ -33,6 +33,7 @@ internal sealed class LocalEvmNode : IAsyncDisposable
             log["blockNumber"] = "0x" + newHeight.ToString("x");
             log["blockHash"] = HashAt(newHeight);
             log["logIndex"] = "0x" + (Convert.ToInt32(log["logIndex"]!.Value<string>()![2..],16) + indexOffset).ToString("x");
+            if (atomicAmount is { } amount) log["data"] = "0x" + amount.ToString("x").PadLeft(64, '0');
             _logs.Add(log);
         }
     }
@@ -41,8 +42,8 @@ internal sealed class LocalEvmNode : IAsyncDisposable
     public int? PauseBlockHeight { get; set; }
     public TaskCompletionSource BlockRequestPaused { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource ResumeBlockRequest { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public int? ObserveEmptyLogsHeight { get; set; }
-    public TaskCompletionSource EmptyLogResponseCreated { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public int? SiblingBlockHeight { get; set; }
+    public TaskCompletionSource SiblingBlockServed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public string Url { get; }
     public LocalEvmNode()
     {
@@ -91,12 +92,10 @@ internal sealed class LocalEvmNode : IAsyncDisposable
                     BlockRequestPaused.TrySetResult();
                     await ResumeBlockRequest.Task;
                 }
-                var result = Reply(request);
-                if (ObserveEmptyLogsHeight is { } emptyHeight && result is JArray { Count: 0 } &&
-                    request["method"]!.Value<string>() == "eth_getLogs" &&
-                    request["params"]![0]!["fromBlock"]!.Value<string>() == "0x" + emptyHeight.ToString("x"))
-                    EmptyLogResponseCreated.TrySetResult();
-                var bytes = Encoding.UTF8.GetBytes(new JObject { ["jsonrpc"] = "2.0", ["id"] = request["id"], ["result"] = result }.ToString());
+                var reply = new JObject { ["jsonrpc"] = "2.0", ["id"] = request["id"] };
+                try { reply["result"] = Reply(request); }
+                catch (UnknownBlockException e) { reply["error"] = new JObject { ["code"] = -32000, ["message"] = e.Message }; }
+                var bytes = Encoding.UTF8.GetBytes(reply.ToString());
                 context.Response.ContentType = "application/json";
                 await context.Response.OutputStream.WriteAsync(bytes);
             }
@@ -121,7 +120,14 @@ internal sealed class LocalEvmNode : IAsyncDisposable
                 lock (_gate)
                     if (!_timestamps.TryGetValue(height, out timestamp))
                         _timestamps[height] = timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                return new JObject { ["number"] = "0x" + height.ToString("x"), ["hash"] = HashAt(height), ["parentHash"] = HashAt(height - 1),
+                var hash = HashAt(height);
+                if (SiblingBlockHeight == height && tag != "finalized" && tag != "latest")
+                {
+                    SiblingBlockHeight = null;
+                    hash = Hash(height + 9000000);
+                    SiblingBlockServed.TrySetResult();
+                }
+                return new JObject { ["number"] = "0x" + height.ToString("x"), ["hash"] = hash, ["parentHash"] = HashAt(height - 1),
                     ["timestamp"] = "0x" + timestamp.ToString("x"), ["transactions"] = new JArray() };
             case "eth_getTransactionReceipt":
                 lock (_gate)
@@ -135,13 +141,18 @@ internal sealed class LocalEvmNode : IAsyncDisposable
                 }
             case "eth_getLogs":
                 var filter = request["params"]![0]!;
-                lock (_gate) return new JArray(_logs.Where(log => log["blockNumber"]!.Value<string>() == filter["fromBlock"]!.Value<string>() &&
-                    log["blockHash"]!.Value<string>() == HashAt(Convert.ToInt32(log["blockNumber"]!.Value<string>()![2..],16)) &&
+                var blockHash = filter["blockHash"]!.Value<string>()!;
+                var hashHeight = Convert.ToInt32(blockHash[^8..], 16) % 1000000;
+                // EIP-234: a node that does not have the block returns an error, never [].
+                if (hashHeight > FinalizedHeight || HashAt(hashHeight) != blockHash)
+                    throw new UnknownBlockException($"block not found: {blockHash}");
+                lock (_gate) return new JArray(_logs.Where(log => log["blockHash"]!.Value<string>() == blockHash &&
                     filter["address"]!.ToString().Contains(log["address"]!.Value<string>()!, StringComparison.OrdinalIgnoreCase) &&
                     filter["topics"]![2]!.ToString().Contains(log["topics"]![2]!.Value<string>()!, StringComparison.OrdinalIgnoreCase)).Select(log => log.DeepClone()));
             default: throw new InvalidOperationException($"Unexpected RPC: {request["method"]}");
         }
     }
+    private sealed class UnknownBlockException(string message) : Exception(message);
     public async ValueTask DisposeAsync()
     {
         _stopping = true;

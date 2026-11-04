@@ -340,7 +340,6 @@ public partial class HostSmokeTests
             // that block request is in flight to prove the cursor cannot skip its payment.
             if (!coInstall)
             {
-                replacementNode.ObserveEmptyLogsHeight = 108;
                 node.PauseBlockHeight = 108;
                 node.Transfer(108, switchedDestination, 1000000);
                 node.FinalizedHeight = 109;

@@ -10,6 +10,7 @@ using BTCPayServer.Plugins.USDC.Services;
 using Microsoft.Extensions.Logging.Abstractions;
 using NBitcoin;
 using Nethereum.Hex.HexTypes;
+using Nethereum.JsonRpc.Client;
 using Nethereum.RPC.Eth.DTOs;
 using Newtonsoft.Json.Linq;
 using Xunit;
@@ -37,10 +38,27 @@ public class RpcPaymentTests
         Assert.Equal(Destination, match.Destination);
         Assert.EndsWith("-USDC-11155111-" + USDCConfigurationProvider.SepoliaContract, match.Id);
         Assert.Equal(1, transport.LogRequests);
-        Assert.Equal("0x64", transport.LastFilter!["fromBlock"]!.Value<string>());
-        Assert.Equal("0x64", transport.LastFilter["toBlock"]!.Value<string>());
+        Assert.Equal(BlockHash, transport.LastFilter!["blockHash"]!.Value<string>());
+        Assert.Null(transport.LastFilter["fromBlock"]);
+        Assert.Null(transport.LastFilter["toBlock"]);
         Assert.Contains(USDCConfigurationProvider.SepoliaContract, transport.LastFilter["address"]!.ToString());
         Assert.Contains(Destination[2..], transport.LastFilter["topics"]!.ToString());
+    }
+
+    [Fact]
+    public async Task NodeWithoutTheBlockStopsTheScanInsteadOfReturningNoTransfers()
+    {
+        var (_, listener, transport) = Create();
+        transport.UnknownBlock = true;
+        await Assert.ThrowsAsync<RpcResponseException>(() => listener.Scan());
+    }
+
+    [Fact]
+    public async Task EmptyAnswerForTheExactBlockIsAuthoritative()
+    {
+        var (_, listener, transport) = Create();
+        Assert.Empty(await listener.Scan());
+        Assert.Equal(1, transport.LogRequests);
     }
 
     [Fact]
@@ -164,6 +182,7 @@ public class RpcPaymentTests
         public JToken? LastFilter { get; private set; }
         public string? LastBlockTag { get; private set; }
         public bool FinalizedAvailable { get; set; } = true;
+        public bool UnknownBlock { get; set; }
         public HttpClient CreateClient(string name) => new(this, false);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -177,6 +196,12 @@ public class RpcPaymentTests
                 case "eth_getLogs":
                     LastFilter = body["params"]![0]!.DeepClone();
                     LogRequests++;
+                    if (UnknownBlock)
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(new JObject { ["jsonrpc"] = "2.0", ["id"] = body["id"],
+                                ["error"] = new JObject { ["code"] = -32000, ["message"] = "block not found" } }.ToString(), Encoding.UTF8, "application/json")
+                        };
                     result = Logs;
                     break;
                 case "eth_getTransactionReceipt":

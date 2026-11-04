@@ -64,6 +64,18 @@ public class ReservationLifecycleTests
             row.SetBlob(blob);
             await context.SaveChangesAsync();
         }
+        // A transfer made just inside the deadline may not be indexed yet, so the
+        // address is held for the grace period before it can be reassigned.
+        Assert.Single(await restarted.GetUsedAddresses(pmi, [address]));
+        Assert.Null(await restarted.Allocate(pmi, "another-store", Guid.NewGuid().ToString("N"), [address]));
+        await using (var context = factory.CreateContext())
+        {
+            var row = await context.Invoices.SingleAsync(i => i.Id == invoiceId);
+            var blob = row.GetBlob();
+            blob.MonitoringExpiration = DateTimeOffset.UtcNow - USDCAddressAllocator.ReuseGrace - TimeSpan.FromSeconds(1);
+            row.SetBlob(blob);
+            await context.SaveChangesAsync();
+        }
         Assert.Empty(await restarted.GetUsedAddresses(pmi, [address]));
         var nextId = Guid.NewGuid().ToString("N");
         Assert.Equal(address, await restarted.Allocate(pmi, "another-store", nextId, [address]));

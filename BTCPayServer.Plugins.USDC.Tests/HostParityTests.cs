@@ -109,6 +109,60 @@ public partial class HostSmokeTests
         await Eventually(async () => (await api.GetInvoice(reused.Id)).Status == InvoiceStatus.Settled);
         Assert.Equal(beforeRestart, (await api.GetInvoicePaymentMethods(reused.Id)).Single().Payments.Select(p => p.Id).Order().ToArray());
 
+        Task<BTCPayServer.Client.Models.InvoiceData> NextInvoice() => api.CreateInvoice(storeId, new CreateInvoiceRequest
+        {
+            Currency = "USDC", Amount = 1,
+            Checkout = new InvoiceDataBase.CheckoutOptions { PaymentMethods = [pmi.ToString()], LazyPaymentMethods = false, SpeedPolicy = SpeedPolicy.HighSpeed }
+        });
+
+        // A failed checkpoint replays at a lower height. The settled payment must not
+        // lose a confirmation or raise a false reconciliation notice.
+        var replayed = await NextInvoice();
+        await using (var context = host.Services.GetRequiredService<ApplicationDbContextFactory>().CreateContext())
+            await context.Database.ExecuteSqlRawAsync("""
+                CREATE FUNCTION usdc_test_checkpoint_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                  IF NEW."Id" = 'USDC_SEPOLIA_LISTENER_STATE' AND (NEW."Value"->>'LastBlockHeight')::numeric >= 128
+                  THEN RAISE EXCEPTION 'Injected checkpoint write failure'; END IF;
+                  RETURN NEW;
+                END $$;
+                CREATE TRIGGER usdc_test_checkpoint_failure BEFORE INSERT OR UPDATE ON "Settings" FOR EACH ROW EXECUTE FUNCTION usdc_test_checkpoint_failure();
+                """);
+        node.Transfer(126, destination, 1000000);
+        node.FinalizedHeight = 131;
+        await Eventually(async () => (await api.GetInvoice(replayed.Id)).Status == InvoiceStatus.Settled);
+        await Task.Delay(TimeSpan.FromSeconds(7)); // Long enough for the retry after the failed write.
+        Assert.DoesNotContain(await repository.GetInvoiceLogs(replayed.Id), l => l.Message.Contains("USDC reconciliation required"));
+        Assert.All((await repository.GetInvoice(replayed.Id)).GetPayments(false), p => Assert.Equal(PaymentStatus.Settled, p.Status));
+        await using (var context = host.Services.GetRequiredService<ApplicationDbContextFactory>().CreateContext())
+            await context.Database.ExecuteSqlRawAsync("DROP TRIGGER usdc_test_checkpoint_failure ON \"Settings\"; DROP FUNCTION usdc_test_checkpoint_failure();");
+        await Eventually(async () => (await settings.Get(EVMUSDCRPCProvider.ListenerStateSettingKey(configuration)))!.LastBlockHeight >= 130);
+
+        // One inconsistent read below the verified cursor is not a reorg and must
+        // not take a real payment out of the accounting.
+        var swapped = await NextInvoice();
+        node.Transfer(132, destination, 1000000);
+        node.FinalizedHeight = 134;
+        await Eventually(async () => (await settings.Get(EVMUSDCRPCProvider.ListenerStateSettingKey(configuration)))!.LastBlockHeight >= 133);
+        Assert.Equal(1m, (await api.GetInvoicePaymentMethods(swapped.Id)).Single().TotalPaid);
+        node.SiblingBlockHeight = 132;
+        await node.SiblingBlockServed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        Assert.Equal(1m, (await api.GetInvoicePaymentMethods(swapped.Id)).Single().TotalPaid);
+        Assert.DoesNotContain((await repository.GetInvoice(swapped.Id)).GetPayments(false), p => p.Status == PaymentStatus.Unaccounted);
+
+        // A reorg re-includes the same transaction with a different amount, such as a
+        // swap's output. The new amount is credited and the chain keeps running.
+        node.ForkFrom(132, 3);
+        node.Reinclude(132, 135, 0, 900000);
+        node.FinalizedHeight = 137;
+        await Eventually(async () => (await api.GetInvoicePaymentMethods(swapped.Id)).Single().TotalPaid == 0.9m);
+        Assert.Null((await settings.Get(EVMUSDCRPCProvider.ListenerStateSettingKey(configuration)))!.HaltReason);
+        var swappedPayments = (await repository.GetInvoice(swapped.Id)).GetPayments(false);
+        Assert.Equal(2, swappedPayments.Count);
+        Assert.Single(swappedPayments, p => p.Status == PaymentStatus.Unaccounted && p.Value == 1m);
+        Assert.Single(swappedPayments, p => p.Status != PaymentStatus.Unaccounted && p.Value == 0.9m);
+
         // A conflicting finalized anchor stops only this chain with a diagnostic.
         node.ForkFrom(100, 2);
         await Eventually(async () => (await settings.Get(EVMUSDCRPCProvider.ListenerStateSettingKey(configuration)))?.HaltReason is not null);
