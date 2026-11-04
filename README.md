@@ -6,7 +6,7 @@ Accept native USDC payments on Ethereum directly to your own wallet. This plugin
 
 The plugin monitors payments. It does not generate wallets, exchange tokens, sweep funds, issue refunds, or send payouts. Sepolia is available for testing the Ethereum payment flow.
 
-**Current status:** version 0.0.4 opens ETHEREUM directly when you click USDC. The network submenu follows the active page, with no expander, and store Settings stays closed on USDC pages. The parent status light remains visible on every page. It remains an unlisted prerelease on Plugin Builder while public-network payment acceptance is pending. See [acceptance evidence](docs/acceptance.md).
+**Current status:** version 0.0.6 uses the standard BTCPay checkout body, the same as the USDt plugin, with no extra network label above the QR code. Clicking USDC opens ETHEREUM directly. The network submenu follows the active page, with no expander, and store Settings stays closed on USDC pages. The parent status light remains visible on every page. It remains unlisted on Plugin Builder while public-network payment acceptance is pending. See [acceptance evidence](docs/acceptance.md).
 
 ## Plugin Builder listing
 
@@ -19,13 +19,13 @@ Copy these values into the Plugin Builder registration and settings forms. The d
 | Plugin description | Accept native USDC payments on Ethereum directly to your own wallet. This plugin adds USDC to BTCPay Server invoices and checkout, detects incoming transfers, and tracks confirmations and settlement. It supports partial payments, overpayments, and reusable receiving addresses. Wallet keys stay with you; no exchange account or USDt plugin is required. |
 | Logo | Upload [docs/assets/usdc.png](docs/assets/usdc.png), the unmodified USDC token logo from Circle's brand kit. |
 | Git repository | `https://github.com/rockstardev/BTCPayServer.Plugins.USDC` |
-| Git branch or tag | The release tag, `v0.0.4`. |
+| Git branch or tag | The release tag, `v0.0.6`. |
 | Directory to the plugin's project | `Plugins/BTCPayServer.Plugins.USDC` |
 | Dotnet build configuration | `Release` |
 | Documentation link | `https://github.com/rockstardev/BTCPayServer.Plugins.USDC/blob/master/README.md` |
 | Plugin Demo Video URL | Leave blank; no demo video is supplied. |
 
-The listing is `https://plugin-builder.btcpayserver.org/public/plugins/usdc`. The package identifier is `BTCPayServer.Plugins.USDC` and the minimum BTCPay Server version is `2.4.4`; the version comes from the project file. Upload the included PNG as the listing logo.
+The listing is `https://plugin-builder.btcpayserver.org/public/plugins/usdc`. The package identifier is `BTCPayServer.Plugins.USDC` and the minimum BTCPay Server version is `2.4.7`; the version comes from the project file. Upload the included PNG as the listing logo.
 
 The PNG and SVG logo files are supplied unchanged from [Circle's official brand kit](https://www.circle.com/pressroom#brand-kit). Their source and checksums are recorded in [docs/assets/README.md](docs/assets/README.md).
 
@@ -54,7 +54,7 @@ Providers must support `eth_chainId`, `eth_call`, `eth_syncing`, `eth_blockNumbe
 
 ## Installation and store setup
 
-The compatibility target and declared minimum are **BTCPay Server 2.4.4**, using .NET 10. Earlier hosts are unsupported. Do not upgrade a live host just to evaluate this branch.
+The compatibility target and declared minimum are **BTCPay Server 2.4.7**, using .NET 10. Earlier hosts are unsupported. Do not upgrade a live host just to evaluate this branch.
 
 1. Use a disposable BTCPay test host with a fresh database.
 2. Build the exact reviewed source using the official packer below, upload the `.btcpay` file through **Server Settings > Plugins**, and restart through the host's normal process.
@@ -137,8 +137,8 @@ Then run `dotnet test BTCPayServer.Plugins.USDC.Tests -c Release --no-build --lo
 - **Not settled yet:** compare indexed height and policy thresholds; inspect the transaction and receipt on the correct network explorer.
 - **Indexing halted:** preserve the diagnostic and checkpoint; investigate finality/data conflicts before restarting monitoring.
 - **Invoice remains settled after a reorg:** inspect unaccounted payments and the reconciliation notice; settlement history does not guarantee current payment accounting.
-- **No plugin navigation:** verify BTCPay >=2.4.4, package identity, installation and restart logs.
+- **No plugin navigation:** verify BTCPay >=2.4.7, package identity, installation and restart logs.
 
 ## Provenance
 
-Started from USDC `6c66e4ad4218edcb737b478d787f2a80a351d75c`. Parity reference is USDt master `f1b3da1bc1ff2131cde946b938a2669e31f8fcc7`, incorporating applicable PR #68 balance precision and PR #69 server navigation spacing. BTCPay is pinned to v2.4.4 (`2d5a0d8077bb33af080e949031da33d84b80638d`). The MIT license and original attribution are retained. Inherited host dependency advisories are reported by NuGet; they are not silently overridden here.
+Started from USDC `6c66e4ad4218edcb737b478d787f2a80a351d75c`. Parity reference is USDt master `f1b3da1bc1ff2131cde946b938a2669e31f8fcc7`, incorporating applicable PR #68 balance precision and PR #69 server navigation spacing. BTCPay is pinned to v2.4.7 (`2868deedd9d911b715fec7306ea9cada36d86bff`). The MIT license and original attribution are retained. Inherited host dependency advisories are reported by NuGet; they are not silently overridden here.

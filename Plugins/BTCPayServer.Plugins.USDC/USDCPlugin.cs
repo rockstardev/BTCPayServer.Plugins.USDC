@@ -62,6 +62,5 @@ public class USDCPlugin : BaseBTCPayServerPlugin
         services.AddUIExtension("store-wallets-nav", "USDC/StoreNav");
         services.AddUIExtension("server-nav", "USDC/ServerNav");
         services.AddUIExtension("store-invoices-payments", "USDC/PaymentDetails");
-        services.AddUIExtension("checkout-end", "USDC/Checkout");
     }
 }
