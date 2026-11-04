@@ -61,7 +61,10 @@ public class LocalForkTests(ITestOutputHelper output)
         };
         foreach (var network in networks)
         {
-            await Rpc("anvil_reset", new { forking = new { jsonRpcUrl = network.JsonRpcUri.AbsoluteUri } });
+            // Anvil reads upstream state by block hash. A load-balanced public RPC may not yet
+            // know the block it just reported as latest, so fork from one every backend has.
+            var upstreamHead = await new Nethereum.Web3.Web3(network.JsonRpcUri.AbsoluteUri).Eth.Blocks.GetBlockNumber.SendRequestAsync();
+            await Rpc("anvil_reset", new { forking = new { jsonRpcUrl = network.JsonRpcUri.AbsoluteUri, blockNumber = (long)upstreamHead.Value - 32 } });
             var config = network with { JsonRpcUri = endpoint };
             await Rpc("anvil_setChainId", config.ChainId);
             var configuration = new USDCPluginConfiguration { EVMUSDCLikeConfigurationItems = new() { [config.GetPaymentMethodId()] = config } };
