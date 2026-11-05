@@ -17,7 +17,7 @@ internal static class USDCAddressPool
         {
             var address = value?.Trim();
             if (!EVMAddressHelper.IsValid(address) || string.Equals(address, contract, StringComparison.OrdinalIgnoreCase))
-            { error = $"Address {result.Count + 1} must be a valid nonzero receiving address, different from the USDC contract."; return false; }
+            { error = $"Address {result.Count + 1} must be a valid nonzero receiving address, different from the USDC contract. A mixed-case address must have a correct checksum, so check it for typing errors."; return false; }
             if (!seen.Add(address!)) { error = $"Duplicate address: {address}."; return false; }
             result.Add(address!.ToLowerInvariant());
         }

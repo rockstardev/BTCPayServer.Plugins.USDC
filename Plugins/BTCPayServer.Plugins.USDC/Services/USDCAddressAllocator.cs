@@ -19,6 +19,11 @@ public sealed class USDCAddressAllocator(ApplicationDbContextFactory factory)
     internal sealed record Claim(string StoreId, string InvoiceId, string Address,
         DateTimeOffset? CreatedAt = null, DateTimeOffset? MonitoringExpiration = null);
 
+    // Holds an expired invoice's address past its deadline, so a transfer made inside the
+    // deadline is indexed before reassignment. Must exceed the 10-minute sync lag beyond
+    // which new invoices stop being offered.
+    internal static readonly TimeSpan ReuseGrace = TimeSpan.FromMinutes(15);
+
     public async Task<string?> Allocate(PaymentMethodId pmi, string storeId, string invoiceId, IEnumerable<string> addresses,
         DateTimeOffset? createdAt = null, DateTimeOffset? monitoringExpiration = null)
     {
@@ -101,7 +106,7 @@ public sealed class USDCAddressAllocator(ApplicationDbContextFactory factory)
         if (invoice is null)
             return claim.MonitoringExpiration is null || claim.MonitoringExpiration > now;
         var entity = invoice.GetBlob();
-        return ShouldReserve(entity.Status, entity.MonitoringExpiration, now);
+        return ShouldReserve(entity.Status, entity.MonitoringExpiration + ReuseGrace, now);
     }
 
     internal static bool ShouldReserve(InvoiceStatus status, DateTimeOffset monitoringExpiration, DateTimeOffset now) =>

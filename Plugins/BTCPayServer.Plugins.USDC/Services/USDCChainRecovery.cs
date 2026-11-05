@@ -134,6 +134,7 @@ public sealed class USDCChainRecovery(
         }
         var handler = handlers[pmi];
         var payment = invoice.GetPayments(false).SingleOrDefault(p => p.PaymentMethodId == pmi && p.Id == observation.Id);
+        var old = payment is null ? null : (USDCPaymentData)handler.ParsePaymentDetails(payment.Details);
         var details = new EVMUSDCPaymentData
         {
             TransactionId = observation.Id, From = observation.From, To = observation.To,
@@ -142,17 +143,20 @@ public sealed class USDCChainRecovery(
         };
         details.UpdateConfirmations(indexedHeight);
         if (!observation.Canonical) details.ConfirmationCount = 0;
+        // A retried cycle or shallow rewind can run at a lower height. While the
+        // payment's own block stands, its confirmations must not go backwards.
+        else if (old is not null && old.BlockHeight == observation.Height && Same(old.BlockHash, observation.BlockHash))
+            details.ConfirmationCount = Math.Max(details.ConfirmationCount, old.ConfirmationCount);
         var status = !observation.Canonical ? PaymentStatus.Unaccounted :
             details.PaymentConfirmed(invoice.SpeedPolicy) ? PaymentStatus.Settled : PaymentStatus.Processing;
 
-        if (payment is not null && (payment.Value != observation.Amount ||
-            !Same(((USDCPaymentData)handler.ParsePaymentDetails(payment.Details)).To, observation.To) ||
-            !Same(((USDCPaymentData)handler.ParsePaymentDetails(payment.Details)).From, observation.From)))
+        if (old is not null && (payment!.Value != observation.Amount ||
+            !Same(old.To, observation.To) || !Same(old.From, observation.From)))
             throw new USDCFinalityConflictException($"Conflicting persisted payment {observation.Id}.");
 
         // Persist the notice before correcting a settled invoice: a crash cannot
         // lose the merchant-facing reconciliation requirement.
-        if (invoice.Status == InvoiceStatus.Settled && status != PaymentStatus.Settled && observation.ReconciliationNotice is null)
+        if (RequiresReconciliation(invoice.Status, payment?.Status, status) && observation.ReconciliationNotice is null)
         {
             observation.ReconciliationNotice = $"USDC reconciliation required: settled invoice {invoice.Id} has a payment removed or deconfirmed by a chain reorganization. Review delivery and payment accounting. Payment: {observation.Id}";
             await Save(pmi, observation);
@@ -174,8 +178,7 @@ public sealed class USDCChainRecovery(
         }
         else
         {
-            var old = (USDCPaymentData)handler.ParsePaymentDetails(payment.Details);
-            if (payment.Status != status || old.BlockHeight != details.BlockHeight ||
+            if (payment.Status != status || old!.BlockHeight != details.BlockHeight ||
                 old.BlockHash != details.BlockHash || old.ConfirmationCount != details.ConfirmationCount ||
                 old.ReconciliationNotice != details.ReconciliationNotice)
             {
@@ -208,6 +211,11 @@ public sealed class USDCChainRecovery(
             await Save(pmi, observation);
         }
     }
+
+    // Only a payment that had settled can undo a settlement. An overpayment still
+    // confirming on an already settled invoice has taken nothing back.
+    internal static bool RequiresReconciliation(InvoiceStatus invoice, PaymentStatus? previous, PaymentStatus current) =>
+        invoice == InvoiceStatus.Settled && previous == PaymentStatus.Settled && current != PaymentStatus.Settled;
 
     internal static bool Same(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 }

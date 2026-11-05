@@ -113,4 +113,29 @@ public class PaymentTests
         Assert.False(USDCChainRecovery.ShouldTrack(invoice, pmi, now.AddMinutes(1)));
         Assert.False(USDCChainRecovery.ShouldTrack(invoice, new PaymentMethodId("USDT-SEPOLIA"), now));
     }
+
+    [Theory]
+    [InlineData("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", true)] // Correct EIP-55 checksum.
+    [InlineData("0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed", true)] // Lowercase carries no checksum.
+    [InlineData("0x5AAEB6053F3E94C9B9A09F33669435E7EF1BEAED", true)] // Uppercase carries no checksum.
+    [InlineData("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeD", false)] // One letter's case is wrong.
+    [InlineData("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeA3d", false)] // One character is mistyped.
+    public void MistypedChecksummedAddressIsRejected(string address, bool expected)
+    {
+        Assert.Equal(expected, EVMAddressHelper.IsValid(address));
+        Assert.Equal(expected, USDCAddressPool.TryNormalize([address], USDCConfigurationProvider.SepoliaContract, out var normalized, out _));
+        if (expected) Assert.Equal(address.ToLowerInvariant(), Assert.Single(normalized));
+    }
+
+    [Theory]
+    [InlineData(InvoiceStatus.Settled, PaymentStatus.Settled, PaymentStatus.Unaccounted, true)]
+    [InlineData(InvoiceStatus.Settled, PaymentStatus.Settled, PaymentStatus.Processing, true)]
+    [InlineData(InvoiceStatus.Settled, PaymentStatus.Processing, PaymentStatus.Processing, false)] // Overpayment still confirming.
+    [InlineData(InvoiceStatus.Settled, PaymentStatus.Processing, PaymentStatus.Unaccounted, false)]
+    [InlineData(InvoiceStatus.Settled, null, PaymentStatus.Processing, false)]
+    [InlineData(InvoiceStatus.Processing, PaymentStatus.Settled, PaymentStatus.Unaccounted, false)]
+    public void OnlyLosingASettledPaymentRequiresReconciliation(InvoiceStatus invoice, PaymentStatus? previous, PaymentStatus current, bool expected)
+    {
+        Assert.Equal(expected, USDCChainRecovery.RequiresReconciliation(invoice, previous, current));
+    }
 }

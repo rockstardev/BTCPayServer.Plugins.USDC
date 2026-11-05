@@ -15,6 +15,7 @@ using Nethereum.Hex.HexTypes;
 using Nethereum.JsonRpc.Client;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
+using Newtonsoft.Json.Linq;
 
 namespace BTCPayServer.Plugins.USDC.Services;
 
@@ -167,6 +168,10 @@ public class EVMUSDCListener(
                 var block = await GetBlock(client, observation.Height);
                 if (!USDCChainRecovery.Same(block.BlockHash, observation.BlockHash))
                 {
+                    // Up to the verified cursor the chain cannot differ unless the
+                    // cursor hash did, so this is one inconsistent read, not a reorg.
+                    if (observation.Height <= cursor)
+                        throw new InvalidOperationException($"RPC returned conflicting block {observation.Height}; replay required.");
                     observation.Canonical = false;
                     await recovery.Save(pmi, observation);
                 }
@@ -185,25 +190,34 @@ public class EVMUSDCListener(
         var matches = watched.Count == 0 ? [] : await GetTransfersAsync(pmi, next, watched, token);
         foreach (var match in matches)
         {
-            var observation = await recovery.Find(pmi, match.TransactionId);
+            var id = match.TransactionId;
             var amount = USDCAmounts.FromBaseUnits(match.TotalAmount, config.Divisibility);
+            var observation = await recovery.Find(pmi, id);
+            string? invoiceId = null;
+            if (observation is { Canonical: false, Finalized: false } && !SameTransfer(observation, match, amount))
+            {
+                // A reorg re-included this transaction with a different outcome, such as
+                // a swap's output. The old transfer stays unaccounted; credit this one apart.
+                if (USDCChainRecovery.Same(observation.To, match.To)) invoiceId = observation.InvoiceId;
+                id = $"{id}-{match.TotalAmount}";
+                observation = await recovery.Find(pmi, id);
+            }
             if (observation is null)
             {
-                var invoice = await recovery.ResolveCurrentInvoice(pmi, match.DestinationKey, timestamp);
-                if (invoice is null) continue;
+                invoiceId ??= (await recovery.ResolveCurrentInvoice(pmi, match.DestinationKey, timestamp))?.Id;
+                if (invoiceId is null) continue;
                 observation = new USDCChainRecovery.Observation
                 {
-                    Id = match.TransactionId, InvoiceId = invoice.Id, From = match.From, To = match.To,
+                    Id = id, InvoiceId = invoiceId, From = match.From, To = match.To,
                     Amount = amount, Timestamp = timestamp, Height = cursor + 1, BlockHash = next.BlockHash
                 };
             }
             else
             {
-                if (observation.Amount != amount || !USDCChainRecovery.Same(observation.To, match.To) ||
-                    !USDCChainRecovery.Same(observation.From, match.From))
-                    throw new USDCFinalityConflictException($"Conflicting transfer identity {match.TransactionId}.");
+                if (!SameTransfer(observation, match, amount))
+                    throw new USDCFinalityConflictException($"Conflicting transfer identity {id}.");
                 if (observation.Finalized && (!USDCChainRecovery.Same(observation.BlockHash, next.BlockHash) || observation.Height != cursor + 1))
-                    throw new USDCFinalityConflictException($"Finalized transfer {match.TransactionId} moved blocks.");
+                    throw new USDCFinalityConflictException($"Finalized transfer {id} moved blocks.");
                 observation.Height = cursor + 1;
                 observation.BlockHash = next.BlockHash;
                 observation.Canonical = true;
@@ -226,6 +240,10 @@ public class EVMUSDCListener(
         await SaveState(config, state);
         return true;
     }
+
+    private static bool SameTransfer(USDCChainRecovery.Observation observation, USDCTransferMatch match, decimal amount) =>
+        observation.Amount == amount && USDCChainRecovery.Same(observation.To, match.To) &&
+        USDCChainRecovery.Same(observation.From, match.From);
 
     private async Task AdvanceFinality(EVMUSDCLikeConfigurationItem config, EVMBasedListenerState state,
         USDCChainRecovery.Observation[] outstanding, long finalized, Web3 client)
@@ -263,38 +281,24 @@ public class EVMUSDCListener(
         await rpcProvider.ValidateNetworkAsync(paymentMethodId, web3Client);
         var transferEvent = web3Client.Eth.GetEvent<TransferEventDTO>(configuration.SmartContractAddress.ToLowerInvariant());
         List<EventLog<TransferEventDTO>> changes = [];
-        var destinationBatches = BatchDestinationAddresses(addresses);
-        var tries = 0;
-        do
+        foreach (var destinationBatch in BatchDestinationAddresses(addresses))
         {
-            changes.Clear();
-            foreach (var destinationBatch in destinationBatches)
-            {
-                var filter = transferEvent.CreateFilterInput(
-                    (object[]?)null,
-                    (object[])destinationBatch,
-                    new BlockParameter(block.Number),
-                    new BlockParameter(block.Number));
-                List<EventLog<TransferEventDTO>> part;
-                try
-                {
-                    part = await transferEvent.GetAllChangesAsync(filter);
-                }
-                catch (RpcResponseException e) when (IsBlockRangeBeyondCurrentHeadError(e))
-                {
-                    throw new InvalidOperationException(
-                        $"eth_getLogs is not ready for {paymentMethodId} block {(long)block.Number.Value}", e);
-                }
-
-                if (part != null && part.Count != 0)
-                    changes.AddRange(part);
-            }
-
-            if (changes.Count != 0)
-                break;
-
-            await Task.Delay(250, stoppingToken);
-        } while (tries++ < 3);
+            stoppingToken.ThrowIfCancellationRequested();
+            var filter = JObject.FromObject(transferEvent.CreateFilterInput(
+                (object[]?)null,
+                (object[])destinationBatch,
+                new BlockParameter(block.Number),
+                new BlockParameter(block.Number)));
+            filter.Remove("fromBlock");
+            filter.Remove("toBlock");
+            // EIP-234: a node without this exact block must return an error. A number
+            // range could be answered empty from a lagging or sibling block, and the
+            // cursor would then skip the payment for good.
+            filter["blockHash"] = block.BlockHash;
+            var logs = await web3Client.Client.SendRequestAsync<FilterLog[]>("eth_getLogs", null, filter)
+                ?? throw new InvalidOperationException($"eth_getLogs returned no result for {paymentMethodId} block {block.BlockHash}.");
+            changes.AddRange(logs.DecodeAllEvents<TransferEventDTO>());
+        }
 
         Dictionary<string, USDCTransferMatch> matches = new(StringComparer.OrdinalIgnoreCase);
         foreach (var transaction in changes.GroupBy(c => c.Log.TransactionHash, StringComparer.OrdinalIgnoreCase))
@@ -356,13 +360,6 @@ public class EVMUSDCListener(
             .Distinct(StringComparer.Ordinal)
             .Chunk(batchSize)
             .ToArray();
-    }
-
-    internal static bool IsBlockRangeBeyondCurrentHeadError(Exception exception)
-    {
-        return exception.Message.Contains("block range extends beyond current head block",
-                   StringComparison.OrdinalIgnoreCase) &&
-               exception.Message.Contains("eth_getLogs", StringComparison.OrdinalIgnoreCase);
     }
 
     internal static bool IsRateLimitException(Exception exception)

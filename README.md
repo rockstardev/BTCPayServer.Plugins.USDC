@@ -6,7 +6,7 @@ Accept native USDC payments on Ethereum directly to your own wallet. This plugin
 
 The plugin monitors payments. It does not generate wallets, exchange tokens, sweep funds, issue refunds, or send payouts. Sepolia is available for testing the Ethereum payment flow.
 
-**Current status:** version 0.0.6 uses the standard BTCPay checkout body, the same as the USDt plugin, with no extra network label above the QR code. Clicking USDC opens ETHEREUM directly. The network submenu follows the active page, with no expander, and store Settings stays closed on USDC pages. The parent status light remains visible on every page. It remains unlisted on Plugin Builder while public-network payment acceptance is pending. See [acceptance evidence](docs/acceptance.md).
+**Current status:** version 0.0.7 hardens payment tracking: transfers are read by exact block hash, inconsistent RPC reads and re-included transfers no longer disturb accounting, mistyped checksummed addresses are rejected, and expired addresses are held 15 minutes before reuse. Checkout uses the standard BTCPay checkout body, the same as the USDt plugin. Clicking USDC opens ETHEREUM directly. The network submenu follows the active page, with no expander, and store Settings stays closed on USDC pages. The parent status light remains visible on every page. It remains unlisted on Plugin Builder while public-network payment acceptance is pending. See [acceptance evidence](docs/acceptance.md).
 
 ## Plugin Builder listing
 
@@ -19,7 +19,7 @@ Copy these values into the Plugin Builder registration and settings forms. The d
 | Plugin description | Accept native USDC payments on Ethereum directly to your own wallet. This plugin adds USDC to BTCPay Server invoices and checkout, detects incoming transfers, and tracks confirmations and settlement. It supports partial payments, overpayments, and reusable receiving addresses. Wallet keys stay with you; no exchange account or USDt plugin is required. |
 | Logo | Upload [docs/assets/usdc.png](docs/assets/usdc.png), the unmodified USDC token logo from Circle's brand kit. |
 | Git repository | `https://github.com/rockstardev/BTCPayServer.Plugins.USDC` |
-| Git branch or tag | The release tag, `v0.0.6`. |
+| Git branch or tag | The release tag, `v0.0.7`. |
 | Directory to the plugin's project | `Plugins/BTCPayServer.Plugins.USDC` |
 | Dotnet build configuration | `Release` |
 | Documentation link | `https://github.com/rockstardev/BTCPayServer.Plugins.USDC/blob/master/README.md` |
@@ -72,7 +72,7 @@ Address input is validated before saving. Duplicates are handled without creatin
 Allocation uses PostgreSQL transactions and a shared advisory lock per payment method, across stores and processes. Retries for the same invoice keep its assignment. UI/API availability and allocation use the same reservation rules:
 
 - `New` and `Processing` invoices retain their address.
-- `Expired` invoices retain it until their saved `MonitoringExpiration`.
+- `Expired` invoices retain it until 15 minutes after their saved `MonitoringExpiration`, so a transfer made inside the deadline is indexed before the address can be reassigned.
 - `Settled` and `Invalid` invoices release it. Assignment history remains durable.
 
 Changing a store's monitoring policy affects future invoices; existing invoices retain their saved deadlines. Removing and re-adding an address does not bypass a live reservation. Monitoring is reconstructed from durable claims, including archived invoices and deadlines more than 49 days old.
@@ -83,7 +83,7 @@ Indexing follows the reference USDt timing: Ethereum/Sepolia lag the current hea
 
 ## Reorganizations and recovery
 
-The plugin persists block hashes/parents, a finalized checkpoint, and a versioned transfer journal. Transfer identity includes chain, contract, transaction hash and receipt-relative event position. A changed block-global log index does not create a second payment. Receipts and log payloads must agree; conflicting data stops advancement.
+The plugin persists block hashes/parents, a finalized checkpoint, and a versioned transfer journal. Transfer identity includes chain, contract, transaction hash and receipt-relative event position. A changed block-global log index does not create a second payment. If a reorganization re-includes a transaction with a different amount, the old transfer stays unaccounted and the new amount is credited as its own payment. Logs are requested by exact block hash, so a node without that block returns an error rather than an empty result; providers must support EIP-234. Receipts and log payloads must agree; conflicting data stops advancement.
 
 An observation's invoice association is persisted before its payment write. A cursor advances only after reading back and verifying durable payment state, including ambiguous `AddPayment` results. On a reorganization the listener finds the common ancestor, marks orphaned payments unaccounted, requests invoice recalculation, rewinds and replays. Settled payments remain monitored through finality even after their address is released.
 
